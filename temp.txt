@@ -1,0 +1,2 @@
+docker run --rm -v C:\Projects\real-time-pipeline\deltalake:/tmp/delta gold-to-sb
+

@@ -1,0 +1,104 @@
+version: '3.8'
+
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - kafka-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+    networks:
+      - kafka-network
+
+  python-producer:
+    build:
+      context: ./producer
+    container_name: python-producer
+    depends_on:
+      - kafka
+    # restart: always
+    networks:
+      - kafka-network
+
+  python-consumer:        
+    build:
+      context: ./consumer
+    container_name: python-consumer
+    depends_on:
+      - kafka
+    # restart: always
+    networks:
+      - kafka-network
+
+  spark:
+    # build:
+    #   context: ./spark
+    image: real-time-spark:latest  
+    container_name: spark
+    depends_on:
+      - kafka
+    volumes:
+      - ./spark:/app
+      - ./deltalake:/tmp/delta 
+    command: [
+      "spark-submit",
+      "--packages",
+      "org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0,io.delta:delta-core_2.12:2.1.0",
+      "/app/kafka_to_bronze.py"
+    ]
+    networks:
+      - kafka-network
+
+  spark-silver:
+    image: real-time-spark:latest  
+    container_name: spark-silver
+    depends_on:
+      - spark
+    volumes:
+      - ./spark:/app
+      - ./deltalake:/tmp/delta
+    command: [
+      "spark-submit",
+      "--packages", "io.delta:delta-core_2.12:2.1.0",
+      "/app/bronze_to_silver.py"
+    ]
+    networks:
+      - kafka-network
+
+  spark-gold:
+    image: real-time-spark:latest
+    container_name: spark-gold
+    depends_on:
+      - spark-silver
+    volumes:
+      - ./spark:/app
+      - ./deltalake:/tmp/delta
+    command: [
+      "spark-submit",
+      "--packages", "io.delta:delta-core_2.12:2.1.0",
+      "/app/silver_to_gold.py"
+    ]
+    networks:
+      - kafka-network
+
+networks:
+  kafka-network:
+    driver: bridge

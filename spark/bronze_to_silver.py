@@ -1,44 +1,51 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
-import time
 
+# ----------------------------
+# Spark Session
+# ----------------------------
 spark = SparkSession.builder \
     .appName("BronzeToSilver") \
-    .config("spark.jars.packages", "io.delta:delta-core_2.12:2.1.0") \
-    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
-    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN")
-bronze_path = "/tmp/delta/bronze"
 
-# Wait for Bronze table
-for _ in range(10):
-    try:
-        spark.read.format("delta").load(bronze_path).limit(1).collect()
-        break
-    except:
-        time.sleep(5)
-else:
-    print("Bronze table not ready. Exiting.")
-    spark.stop()
-    exit(1)
+# ----------------------------
+# Function to create silver stream
+# ----------------------------
+def create_silver_stream(input_path, output_path):
 
-# Read Bronze stream
-df_bronze = spark.readStream.format("delta").load(bronze_path)
+    df_bronze = spark.readStream \
+        .format("delta") \
+        .load(input_path)
 
-# Clean & deduplicate
-df_silver = df_bronze.filter(
-    col("user_id").isNotNull() &
-    col("product_id").isNotNull() &
-    col("event_type").isin("click", "purchase") &
-    (col("price") > 0)
-).dropDuplicates(["event_id"])
+# watermark saying if i see the same event id again , ignore it .
+    df_cleaned = df_bronze \
+        .filter(col("event_id").isNotNull()) \
+        .filter(col("event_time").isNotNull()) \
+        .withWatermark("event_time", "10 minutes") \
+        .dropDuplicates(["event_id"])
 
-# Write Silver Delta table
-df_silver.writeStream \
-    .format("delta") \
-    .outputMode("append") \
-    .option("checkpointLocation", "/tmp/delta/silver/_checkpoint") \
-    .start("/tmp/delta/silver") \
-    .awaitTermination()
+    return df_cleaned.writeStream \
+        .format("delta") \
+        .outputMode("append") \
+        .option("checkpointLocation", f"{output_path}/_checkpoint") \
+        .start(output_path)
+
+
+# ----------------------------
+# Start Both Silver Streams
+# ----------------------------
+
+query_user = create_silver_stream(
+    "/tmp/delta/bronze/user_activity",
+    "/tmp/delta/silver/user_activity"
+)
+
+query_order = create_silver_stream(
+    "/tmp/delta/bronze/order_events",
+    "/tmp/delta/silver/order_events"
+)
+
+query_user.awaitTermination()
+query_order.awaitTermination()

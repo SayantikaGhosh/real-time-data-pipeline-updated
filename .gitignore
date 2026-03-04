@@ -1,0 +1,22 @@
+# Delta Lake data
+deltalake/
+
+# Producer state
+producer_data/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# Spark checkpoints
+*_checkpoint*
+
+# parquet
+*.parquet
+
+# environment
+.env
+
+# OS
+.DS_Store
+Thumbs.db

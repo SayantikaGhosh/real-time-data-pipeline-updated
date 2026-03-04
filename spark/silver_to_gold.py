@@ -1,10 +1,13 @@
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
-    col, sum as spark_sum, count, when, to_date,
-    approx_count_distinct, concat_ws
+    col,
+    sum as spark_sum,
+    count,
+    when,
+    approx_count_distinct,
+    lit,
+    window
 )
-import time
-
 
 spark = (
     SparkSession.builder
@@ -16,68 +19,71 @@ spark = (
 
 spark.sparkContext.setLogLevel("WARN")
 
-silver_path = "/tmp/delta/silver"
-gold_path = "/tmp/delta/gold"
-checkpoint_path = "/tmp/delta/gold/_checkpoint"
+df_user = spark.readStream.format("delta").load("/tmp/delta/silver/user_activity")
+df_orders = spark.readStream.format("delta").load("/tmp/delta/silver/order_events")
 
-for _ in range(10):
-    try:
-        spark.read.format("delta").load(silver_path).limit(1).collect()
-        break
-    except:
-        print("Waiting for Silver table to be ready...")
-        time.sleep(5)
-else:
-    print("Silver table not ready. Exiting.")
-    spark.stop()
-    exit(1)
+# Smaller watermark for demo
+df_user = df_user.withWatermark("event_time", "2 minutes")
+df_orders = df_orders.withWatermark("event_time", "2 minutes")
 
-
-df_silver = spark.readStream.format("delta").load(silver_path)
-
-
-df_with_watermark = df_silver.withWatermark("timestamp", "10 minutes")
-
-
-df_gold = (
-    df_with_watermark
+# ================= USER METRICS =================
+user_gold = (
+    df_user
     .groupBy(
         "product_id",
-        "product_name",
         "category",
-        "brand",
-        to_date(col("timestamp")).alias("event_date")
+        window(col("event_time"), "1 minute")
     )
     .agg(
-        count("*").alias("total_events_count"),
+        spark_sum(when(col("event_type") == "view", 1).otherwise(0)).alias("view_count"),
         spark_sum(when(col("event_type") == "click", 1).otherwise(0)).alias("click_count"),
-        spark_sum(when(col("event_type") == "purchase", 1).otherwise(0)).alias("purchase_count"),
-        spark_sum(col("price")).alias("total_revenue_usd"),
-        spark_sum(when(col("event_type") == "purchase", col("price")).otherwise(0)).alias("purchase_revenue_usd"),
+        spark_sum(when(col("event_type") == "add_to_cart", 1).otherwise(0)).alias("add_to_cart_count"),
         approx_count_distinct("user_id").alias("unique_users")
+    )
+    .withColumn("window_start", col("window.start"))
+    .withColumn("window_end", col("window.end"))
+    .drop("window")
+    # ✅ ADD CTR HERE
+    .withColumn(
+        "click_through_rate",
+        when(col("view_count") > 0,
+             col("click_count") / col("view_count")
+        ).otherwise(lit(0.0))
     )
 )
 
-
-df_gold = (
-    df_gold
-    .withColumn("avg_revenue_per_event", col("total_revenue_usd") / col("total_events_count"))
-    .withColumn("conversion_rate", col("purchase_count") / col("total_events_count"))
-    .withColumn("avg_price_per_purchase", col("purchase_revenue_usd") / col("purchase_count"))
-    .withColumn("click_to_purchase_ratio", col("click_count") / col("purchase_count"))
-    .withColumn("events_per_user", col("total_events_count") / col("unique_users"))
-    .withColumn("purchases_per_user", col("purchase_count") / col("unique_users"))
-)
-
-
-df_gold = df_gold.withColumn("record_id", concat_ws("_", col("product_id"), col("event_date")))
-
-(
-    df_gold.writeStream
+user_query = (
+    user_gold.writeStream
     .format("delta")
-    .outputMode("complete")  
-    .option("checkpointLocation", checkpoint_path)
-    .option("mergeSchema", "true")
-    .start(gold_path)
-    .awaitTermination()
+    .outputMode("append")
+    .option("checkpointLocation", "/tmp/delta/gold/user_metrics/_checkpoint_v4")
+    .start("/tmp/delta/gold/user_metrics")
 )
+
+# ================= ORDER METRICS =================
+order_gold = (
+    df_orders
+    .groupBy(
+        "product_id",
+        "category",
+        window(col("event_time"), "1 minute")
+    )
+    .agg(
+        count("*").alias("purchase_count"),
+        spark_sum("price").alias("total_revenue_usd"),
+        approx_count_distinct("user_id").alias("unique_buyers")
+    )
+    .withColumn("window_start", col("window.start"))
+    .withColumn("window_end", col("window.end"))
+    .drop("window")
+)
+
+order_query = (
+    order_gold.writeStream
+    .format("delta")
+    .outputMode("append")
+    .option("checkpointLocation", "/tmp/delta/gold/order_metrics/_checkpoint_v4")
+    .start("/tmp/delta/gold/order_metrics")
+)
+
+spark.streams.awaitAnyTermination()

@@ -10,6 +10,3 @@ RUN apt-get update && \
 # Set the Python interpreter for PySpark
 ENV PYSPARK_PYTHON=python3
 
-
-# ✅ Copy MySQL connector JAR into the container
-# COPY ./spark/jars/mysql-connector-j-9.3.0.jar /app/jars/mysql-connector-j-9.3.0.jar

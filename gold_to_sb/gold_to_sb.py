@@ -2,68 +2,153 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 import os
 
+# -----------------------------------
+# Paths to Gold Delta
+# -----------------------------------
+USER_GOLD_PATH = "/tmp/delta/gold/user_metrics"
+ORDER_GOLD_PATH = "/tmp/delta/gold/order_metrics"
 
-gold_folder = "/tmp/delta/gold"
+# -----------------------------------
+# Supabase connection
+# -----------------------------------
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-DATABASE_URL = ""
-
+if not DATABASE_URL:
+    print("[ERROR] DATABASE_URL not set.")
+    exit(1)
 
 engine = create_engine(DATABASE_URL, connect_args={"sslmode": "require"})
 
-if not os.path.exists(gold_folder):
-    print(f"[ERROR] Gold folder does not exist: {gold_folder}")
-    exit(1)
 
-all_files = [os.path.join(gold_folder, f) for f in os.listdir(gold_folder) if f.endswith(".parquet")]
-if not all_files:
-    print("[INFO] No Parquet files found in Gold folder. Exiting.")
-    exit(0)
+# -----------------------------------
+# Recursively load parquet files
+# -----------------------------------
+def load_parquet_folder(folder_path):
+    if not os.path.exists(folder_path):
+        print(f"[ERROR] Folder does not exist: {folder_path}")
+        return None
 
-df = pd.concat([pd.read_parquet(f) for f in all_files], ignore_index=True)
-print(f" Total rows read from Gold layer: {len(df)}")
+    parquet_files = []
 
-if "record_id" not in df.columns or "event_date" not in df.columns:
-    print("[ERROR] Gold data missing 'record_id' or 'event_date' column.")
-    exit(1)
+    for root, dirs, files in os.walk(folder_path):
 
-df["event_date"] = pd.to_datetime(df["event_date"], errors="coerce")
+        # 🔥 Skip Delta metadata folder
+        if "_delta_log" in root:
+            continue
+
+        for file in files:
+            # 🔥 Only include actual data files
+            if file.startswith("part-") and file.endswith(".parquet"):
+                parquet_files.append(os.path.join(root, file))
+
+    if not parquet_files:
+        print(f"[INFO] No parquet files found in {folder_path}")
+        return None
+
+    print("[DEBUG] Data files detected:")
+    for f in parquet_files:
+        print("   ", f)
+
+    df = pd.concat(
+        [pd.read_parquet(f) for f in parquet_files],
+        ignore_index=True
+    )
+
+    print(f"[INFO] Loaded {len(df)} rows from {folder_path}")
+    return df
 
 
-records = df.to_dict(orient="records")
+# ===================================
+# 🔵 Sync USER METRICS
+# ===================================
+user_df = load_parquet_folder(USER_GOLD_PATH)
 
-with engine.begin() as conn:
-    for record in records:
-        conn.execute(
-            text("""
-                INSERT INTO gold_table (
-                    record_id, product_id, product_name, category, brand,
-                    event_date, total_events_count, click_count, purchase_count,
-                    total_revenue_usd, purchase_revenue_usd, unique_users,
-                    avg_revenue_per_event, conversion_rate, avg_price_per_purchase,
-                    click_to_purchase_ratio, events_per_user, purchases_per_user
-                )
-                VALUES (
-                    :record_id, :product_id, :product_name, :category, :brand,
-                    :event_date, :total_events_count, :click_count, :purchase_count,
-                    :total_revenue_usd, :purchase_revenue_usd, :unique_users,
-                    :avg_revenue_per_event, :conversion_rate, :avg_price_per_purchase,
-                    :click_to_purchase_ratio, :events_per_user, :purchases_per_user
-                )
-                ON CONFLICT (record_id) DO UPDATE SET
-                    total_events_count = EXCLUDED.total_events_count,
-                    click_count = EXCLUDED.click_count,
-                    purchase_count = EXCLUDED.purchase_count,
-                    total_revenue_usd = EXCLUDED.total_revenue_usd,
-                    purchase_revenue_usd = EXCLUDED.purchase_revenue_usd,
-                    unique_users = EXCLUDED.unique_users,
-                    avg_revenue_per_event = EXCLUDED.avg_revenue_per_event,
-                    conversion_rate = EXCLUDED.conversion_rate,
-                    avg_price_per_purchase = EXCLUDED.avg_price_per_purchase,
-                    click_to_purchase_ratio = EXCLUDED.click_to_purchase_ratio,
-                    events_per_user = EXCLUDED.events_per_user,
-                    purchases_per_user = EXCLUDED.purchases_per_user;
-            """),
-            record
-        )
+if user_df is not None:
 
-print(" Supabase upsert completed — all data synced successfully!")
+    user_df["window_start"] = pd.to_datetime(user_df["window_start"], errors="coerce")
+    user_df["window_end"] = pd.to_datetime(user_df["window_end"], errors="coerce")
+
+    with engine.begin() as conn:
+        for _, row in user_df.iterrows():
+            conn.execute(
+                text("""
+                    INSERT INTO user_metrics (
+                        product_id,
+                        category,
+                        window_start,
+                        window_end,
+                        view_count,
+                        click_count,
+                        add_to_cart_count,
+                        unique_users,
+                        click_through_rate
+                    )
+                    VALUES (
+                        :product_id,
+                        :category,
+                        :window_start,
+                        :window_end,
+                        :view_count,
+                        :click_count,
+                        :add_to_cart_count,
+                        :unique_users,
+                        :click_through_rate
+                    )
+                    ON CONFLICT (product_id, window_start)
+                    DO UPDATE SET
+                        view_count = EXCLUDED.view_count,
+                        click_count = EXCLUDED.click_count,
+                        add_to_cart_count = EXCLUDED.add_to_cart_count,
+                        unique_users = EXCLUDED.unique_users,
+                        click_through_rate = EXCLUDED.click_through_rate;
+                """),
+                row.to_dict()
+            )
+
+    print(" User metrics synced successfully.")
+
+
+# ===================================
+# 🟡 Sync ORDER METRICS
+# ===================================
+order_df = load_parquet_folder(ORDER_GOLD_PATH)
+
+if order_df is not None:
+
+    order_df["window_start"] = pd.to_datetime(order_df["window_start"], errors="coerce")
+    order_df["window_end"] = pd.to_datetime(order_df["window_end"], errors="coerce")
+
+    with engine.begin() as conn:
+        for _, row in order_df.iterrows():
+            conn.execute(
+                text("""
+                    INSERT INTO order_metrics (
+                        product_id,
+                        category,
+                        window_start,
+                        window_end,
+                        purchase_count,
+                        total_revenue_usd,
+                        unique_buyers
+                    )
+                    VALUES (
+                        :product_id,
+                        :category,
+                        :window_start,
+                        :window_end,
+                        :purchase_count,
+                        :total_revenue_usd,
+                        :unique_buyers
+                    )
+                    ON CONFLICT (product_id, window_start)
+                    DO UPDATE SET
+                        purchase_count = EXCLUDED.purchase_count,
+                        total_revenue_usd = EXCLUDED.total_revenue_usd,
+                        unique_buyers = EXCLUDED.unique_buyers;
+                """),
+                row.to_dict()
+            )
+
+    print(" Order metrics synced successfully.")
+
+print(" Supabase sync completed successfully.")

@@ -1,6 +1,6 @@
-version: '3.8'
 
 services:
+
   zookeeper:
     image: confluentinc/cp-zookeeper:7.4.0
     container_name: zookeeper
@@ -25,6 +25,7 @@ services:
       KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_HEAP_OPTS: "-Xmx512M -Xms512M"
     networks:
       - kafka-network
 
@@ -34,52 +35,47 @@ services:
     container_name: python-producer
     depends_on:
       - kafka
-    # restart: always
+    volumes:
+      - ./producer_data:/app/data
     networks:
       - kafka-network
 
-  python-consumer:        
-    build:
-      context: ./consumer
-    container_name: python-consumer
-    depends_on:
-      - kafka
-    # restart: always
-    networks:
-      - kafka-network
-
-  spark:
-    # build:
-    #   context: ./spark
-    image: real-time-spark:latest  
-    container_name: spark
+  spark-bronze:
+    image: real-time-spark:latest
+    container_name: spark-bronze
     depends_on:
       - kafka
     volumes:
       - ./spark:/app
-      - ./deltalake:/tmp/delta 
-    command: [
-      "spark-submit",
-      "--packages",
-      "org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0,io.delta:delta-core_2.12:2.1.0",
-      "/app/kafka_to_bronze.py"
-    ]
+      - ./deltalake:/tmp/delta
+    command:
+      [
+        "spark-submit",
+        "--driver-memory", "1g",
+        "--executor-memory", "1g",
+        "--packages",
+        "org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0,io.delta:delta-core_2.12:2.1.0",
+        "/app/kafka_to_bronze.py"
+      ]
     networks:
       - kafka-network
 
   spark-silver:
-    image: real-time-spark:latest  
+    image: real-time-spark:latest
     container_name: spark-silver
     depends_on:
-      - spark
+      - spark-bronze
     volumes:
       - ./spark:/app
       - ./deltalake:/tmp/delta
-    command: [
-      "spark-submit",
-      "--packages", "io.delta:delta-core_2.12:2.1.0",
-      "/app/bronze_to_silver.py"
-    ]
+    command:
+      [
+        "spark-submit",
+        "--driver-memory", "1g",
+        "--executor-memory", "1g",
+        "--packages", "io.delta:delta-core_2.12:2.1.0",
+        "/app/bronze_to_silver.py"
+      ]
     networks:
       - kafka-network
 
@@ -91,11 +87,14 @@ services:
     volumes:
       - ./spark:/app
       - ./deltalake:/tmp/delta
-    command: [
-      "spark-submit",
-      "--packages", "io.delta:delta-core_2.12:2.1.0",
-      "/app/silver_to_gold.py"
-    ]
+    command:
+      [
+        "spark-submit",
+        "--driver-memory", "1g",
+        "--executor-memory", "1g",
+        "--packages", "io.delta:delta-core_2.12:2.1.0",
+        "/app/silver_to_gold.py"
+      ]
     networks:
       - kafka-network
 

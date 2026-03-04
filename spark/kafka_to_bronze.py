@@ -2,48 +2,80 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import from_json, col, to_timestamp
 from pyspark.sql.types import StructType, StringType, FloatType
 
-# Schema matching producer events
-schema = StructType() \
-    .add("event_id", StringType()) \
-    .add("user_id", StringType()) \
-    .add("user_name", StringType()) \
-    .add("event_type", StringType()) \
-    .add("product_id", StringType()) \
-    .add("product_name", StringType()) \
-    .add("category", StringType()) \
-    .add("brand", StringType()) \
-    .add("price", FloatType()) \
-    .add("timestamp", StringType())  
-
-# Spark session with Delta + Kafka
+# ----------------------------
+# Spark Session
+# ----------------------------
 spark = SparkSession.builder \
     .appName("KafkaToBronze") \
-    .config("spark.jars.packages",
-            "org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0,io.delta:delta-core_2.12:2.1.0") \
-    .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
-    .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN")
 
-# Read from Kafka
-df_raw = spark.readStream \
-    .format("kafka") \
-    .option("kafka.bootstrap.servers", "kafka:9092") \
-    .option("subscribe", "test-topic") \
-    .option("startingOffsets", "earliest") \
-    .load()
+# ----------------------------
+# Schema
+# ----------------------------
+schema = StructType() \
+    .add("event_id", StringType()) \
+    .add("session_id", StringType()) \
+    .add("user_id", StringType()) \
+    .add("event_type", StringType()) \
+    .add("product_id", StringType()) \
+    .add("category", StringType()) \
+    .add("price", FloatType()) \
+    .add("event_time", StringType()) \
+    .add("ingestion_time", StringType())
 
-# Parse JSON and convert timestamp
-df_parsed = df_raw.selectExpr("CAST(value AS STRING) as json") \
-    .select(from_json(col("json"), schema).alias("data")) \
-    .select("data.*") \
-    .withColumn("timestamp", to_timestamp(col("timestamp")))  
+# ----------------------------
+# Bronze Stream Creator
+# ----------------------------
+def create_bronze_stream(topic, output_path):
 
-# Write to Bronze Delta table
-df_parsed.writeStream \
-    .format("delta") \
-    .outputMode("append") \
-    .option("checkpointLocation", "/tmp/delta/bronze/_checkpoint") \
-    .start("/tmp/delta/bronze") \
-    .awaitTermination()
+    df_raw = spark.readStream \
+        .format("kafka") \
+        .option("kafka.bootstrap.servers", "kafka:9092") \
+        .option("subscribe", topic) \
+        .option("startingOffsets", "latest") \
+        .option("failOnDataLoss", "false") \
+        .option("maxOffsetsPerTrigger", 1000) \
+        .load()
+
+    df_parsed = df_raw \
+        .selectExpr(
+            "CAST(value AS STRING) as json",
+            "topic",
+            "partition",
+            "offset",
+            "timestamp as kafka_timestamp"
+        ) \
+        .select(
+            from_json(col("json"), schema).alias("data"),
+            col("topic"),
+            col("partition"),
+            col("offset"),
+            col("kafka_timestamp")
+        ) \
+        .select("data.*", "topic", "partition", "offset", "kafka_timestamp") \
+        .withColumn("event_time", to_timestamp(col("event_time"))) \
+        .withColumn("ingestion_time", to_timestamp(col("ingestion_time")))
+
+    return df_parsed.writeStream \
+        .format("delta") \
+        .outputMode("append") \
+        .option("checkpointLocation", f"{output_path}/_checkpoint") \
+        .start(output_path)
+
+
+# ----------------------------
+# Start Both Streams
+# ----------------------------
+create_bronze_stream(
+    "user_activity_events",
+    "/tmp/delta/bronze/user_activity"
+)
+
+create_bronze_stream(
+    "order_events",
+    "/tmp/delta/bronze/order_events"
+)
+
+spark.streams.awaitAnyTermination()

@@ -26,6 +26,15 @@ services:
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_HEAP_OPTS: "-Xmx512M -Xms512M"
+      KAFKA_NUM_PARTITIONS: 1
+      KAFKA_LOG_RETENTION_HOURS: 2
+      KAFKA_LOG_SEGMENT_BYTES: 52428800
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
     networks:
       - kafka-network
 
@@ -34,9 +43,11 @@ services:
       context: ./producer
     container_name: python-producer
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
     volumes:
       - ./producer_data:/app/data
+    restart: "no"
     networks:
       - kafka-network
 
@@ -44,19 +55,25 @@ services:
     image: real-time-spark:latest
     container_name: spark-bronze
     depends_on:
-      - kafka
+      kafka:
+        condition: service_healthy
+    environment:
+      JAVA_HOME: /opt/bitnami/java
     volumes:
       - ./spark:/app
       - ./deltalake:/tmp/delta
     command:
       [
         "spark-submit",
-        "--driver-memory", "1g",
-        "--executor-memory", "1g",
+        "--driver-memory", "512m",
+        "--executor-memory", "512m",
+        "--conf", "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension",
+        "--conf", "spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog",
         "--packages",
         "org.apache.spark:spark-sql-kafka-0-10_2.12:3.3.0,io.delta:delta-core_2.12:2.1.0",
         "/app/kafka_to_bronze.py"
       ]
+    restart: on-failure
     networks:
       - kafka-network
 
@@ -64,18 +81,24 @@ services:
     image: real-time-spark:latest
     container_name: spark-silver
     depends_on:
-      - spark-bronze
+      kafka:
+        condition: service_healthy
+    environment:
+      JAVA_HOME: /opt/bitnami/java
     volumes:
       - ./spark:/app
       - ./deltalake:/tmp/delta
     command:
       [
         "spark-submit",
-        "--driver-memory", "1g",
-        "--executor-memory", "1g",
+        "--driver-memory", "512m",
+        "--executor-memory", "512m",
+        "--conf", "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension",
+        "--conf", "spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog",
         "--packages", "io.delta:delta-core_2.12:2.1.0",
         "/app/bronze_to_silver.py"
       ]
+    restart: on-failure
     networks:
       - kafka-network
 
@@ -83,20 +106,65 @@ services:
     image: real-time-spark:latest
     container_name: spark-gold
     depends_on:
-      - spark-silver
+      kafka:
+        condition: service_healthy
+    environment:
+      JAVA_HOME: /opt/bitnami/java
     volumes:
       - ./spark:/app
       - ./deltalake:/tmp/delta
     command:
       [
         "spark-submit",
-        "--driver-memory", "1g",
-        "--executor-memory", "1g",
+        "--driver-memory", "512m",
+        "--executor-memory", "512m",
+        "--conf", "spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension",
+        "--conf", "spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog",
         "--packages", "io.delta:delta-core_2.12:2.1.0",
         "/app/silver_to_gold.py"
       ]
+    restart: on-failure
     networks:
       - kafka-network
+
+  # prometheus:
+  #   image: prom/prometheus
+  #   container_name: prometheus
+  #   volumes:
+  #     - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+  #   ports:
+  #     - "9090:9090"
+  #   networks:
+  #     - kafka-network
+
+  # grafana:
+  #   image: grafana/grafana
+  #   container_name: grafana
+  #   ports:
+  #     - "3000:3000"
+  #   networks:
+  #     - kafka-network
+
+  # node-exporter:
+  #   image: prom/node-exporter
+  #   container_name: node-exporter
+  #   ports:
+  #     - "9100:9100"
+  #   networks:
+  #     - kafka-network
+
+  # cadvisor:
+  #   image: gcr.io/cadvisor/cadvisor
+  #   container_name: cadvisor
+  #   ports:
+  #     - "8080:8080"
+  #   volumes:
+  #     - /:/rootfs:ro
+  #     - /var/run:/var/run:rw
+  #     - /sys:/sys:ro
+  #     - /var/lib/docker/:/var/lib/docker:ro
+  #   networks:
+  #     - kafka-network
 
 networks:
   kafka-network:

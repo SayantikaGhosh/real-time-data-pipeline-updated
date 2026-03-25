@@ -9,4 +9,3 @@ RUN apt-get update && \
 
 # Set the Python interpreter for PySpark
 ENV PYSPARK_PYTHON=python3
-

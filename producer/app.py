@@ -16,7 +16,7 @@ KAFKA_HOST            = "kafka"
 KAFKA_PORT            = 9092
 KAFKA_WAIT_TIMEOUT    = 60       # seconds to wait for Kafka to be ready
 
-RUN_DURATION_SECONDS  = 600      # 10 minutes — long enough for Spark to build
+RUN_DURATION_SECONDS  = 1200      # 20 minutes — long enough for Spark to build
                                   # meaningful windows and Gold to aggregate properly
 
 NUM_USERS             = 100       # more users = more realistic traffic volume
@@ -293,11 +293,18 @@ while time.time() - start_time < RUN_DURATION_SECONDS:
     state_dirty   = False
     loop_events   = 0
 
-    # Shuffle user order each loop — breaks the lockstep pattern
-    user_ids = list(users.keys())
-    random.shuffle(user_ids)
+    elapsed = time.time() - start_time
+    if 480 <= elapsed <= 600:
+        active_users = list(users.keys())
+    else:
+        active_users = random.sample(list(users.keys()), k=max(1, int(len(users) * 0.4)))
 
-    for user_id in user_ids:
+    random.shuffle(active_users)
+
+    # Shuffle user order each loop — breaks the lockstep pattern
+
+
+    for user_id in active_users:
 
         # Tiny stagger between users (1–5ms).
         # Just enough to break lockstep — not enough to kill event volume.
